@@ -64,7 +64,6 @@ def fetch_latest_bookings(max_rows: int):
 
     return data.get("bookings", [])
 
-
 def format_booking_message(b):
     event = b.get("event", {}) or {}
     participant = b.get("participant", {}) or {}
@@ -72,28 +71,52 @@ def format_booking_message(b):
 
     event_name = event.get("name", "Okänd kurs")
     event_code = event.get("code", "")
-    start_dt = event.get("startDateTime", "") or f"{event.get('startDate','')} {event.get('startTime','')}".strip()
+    start_dt = event.get("startDateTime") or (
+        f"{event.get('startDate','')} {event.get('startTime','')}".strip()
+    )
 
     participant_name = participant.get("name", "Okänd deltagare")
     status_name = (b.get("status", {}) or {}).get("name", "")
+    created = b.get("created", "")  # ← viktigt för “senaste bokningen”
 
-    paid = payment.get("paid", False)
-    amount = payment.get("amountPaid")
+    # Payment
+    paid = payment.get("paid")
+    amount_paid = payment.get("amountPaid")
+    price = payment.get("priceAgreed")
     currency = payment.get("currency", "SEK")
+    due = payment.get("paymentDue")
 
-    paid_str = "✅ Betald" if paid else "⏳ Ej betald"
-    amount_str = f" ({amount} {currency})" if amount is not None else ""
+    # Payment strings
+    if paid is True:
+        paid_str = "✅ Betald"
+        if amount_paid is not None:
+            paid_str += f" ({amount_paid} {currency})"
+    elif paid is False:
+        paid_str = "⏳ Ej betald"
+        if due:
+            paid_str += f" (förfallo {due})"
+    else:
+        paid_str = "❓ Betalstatus okänd"
+
+    price_str = f"💰 Pris: {price} {currency}" if price is not None else None
 
     lines = [
         f"{event_name}",
         f"Elev: {participant_name}",
         f"Status: {status_name}",
     ]
+
     if start_dt:
         lines.append(f"Start: {start_dt}")
     if event_code:
         lines.append(f"Kod: {event_code}")
-    lines.append(f"{paid_str}{amount_str}")
+    if price_str:
+        lines.append(price_str)
+
+    lines.append(paid_str)
+
+    if created:
+        lines.append(f"🕒 Skapad: {created}")
 
     return "\n".join([line for line in lines if line.strip()])
 
