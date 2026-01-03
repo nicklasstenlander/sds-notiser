@@ -35,7 +35,7 @@ jobs:
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
 
           FETCH_MAX_ROWS: "25"
-          MAX_NOTIFICATIONS_PER_RUN: "5"
+          MAX_NOTIFICATIONS_PER_RUN: "25"
         run: python notify_bookings.py
 
       - name: Commit state.json (if changed)
