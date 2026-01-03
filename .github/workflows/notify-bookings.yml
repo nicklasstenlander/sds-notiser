@@ -28,7 +28,7 @@ jobs:
       - name: Run notifier
         env:
           COGWORK_ORG: sollentunadans
-          COGWORK_PW: ""  # ni har ingen pw
+          COGWORK_PW: ${{ secrets.COGWORK_PW }}
           COGWORK_BASE: https://dans.se/api/public
 
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
