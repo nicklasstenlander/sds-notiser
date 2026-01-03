@@ -1,134 +1,156 @@
 import os
 import json
+import time
+from datetime import datetime
 import requests
-from datetime import datetime, timedelta
-import pytz
 
-ORG = "sollentunadans"
-BASE = "https://dans.se/api/public"
+ORG = os.getenv("COGWORK_ORG", "sollentunadans")
+PW = os.getenv("COGWORK_PW", "")  # ni har ingen pw just nu
+COGWORK_BASE = os.getenv("COGWORK_BASE", "https://dans.se/api/public")
 
-STATE_FILE = "booking_state.json"
+PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN")
+PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 
-PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN", "")
-PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY", "")
+STATE_FILE = "state.json"
 
-TZ = pytz.timezone("Europe/Stockholm")
+# Hur många notiser max per körning (skydd mot spam om många nya)
+MAX_NOTIFICATIONS_PER_RUN = int(os.getenv("MAX_NOTIFICATIONS_PER_RUN", "5"))
+
+# Hur många bokningar vi hämtar varje körning (behöver vara > MAX_NOTIFICATIONS_PER_RUN)
+FETCH_MAX_ROWS = int(os.getenv("FETCH_MAX_ROWS", "25"))
 
 
 def load_state():
     if not os.path.exists(STATE_FILE):
-        return {"last_created": None, "last_id": None}
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return {"last_notified_booking_id": 0}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"last_notified_booking_id": 0}
 
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def parse_created(dt_str: str) -> datetime:
-    # API-format: "YYYY-MM-DD HH:MM:SS"
-    return TZ.localize(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S"))
+def pushover_send(title: str, message: str):
+    if not PUSHOVER_APP_TOKEN or not PUSHOVER_USER_KEY:
+        raise RuntimeError("Missing PUSHOVER_APP_TOKEN or PUSHOVER_USER_KEY (GitHub Secrets).")
+
+    payload = {
+        "token": PUSHOVER_APP_TOKEN,
+        "user": PUSHOVER_USER_KEY,
+        "title": title,
+        "message": message,
+    }
+    r = requests.post("https://api.pushover.net/1/messages.json", data=payload, timeout=30)
+    # Ge lite bättre felmeddelande om något går fel
+    if r.status_code >= 400:
+        raise RuntimeError(f"Pushover error {r.status_code}: {r.text}")
+    return r.json()
 
 
-def fetch_latest_bookings(max_rows=25):
-    url = f"{BASE}/bookings/?org={ORG}&maxRows={max_rows}&verbose=1"
+def fetch_latest_bookings(max_rows: int):
+    # Vi tar alltid senaste bokningarna via maxRows=... (API verkar returnera nyast först i era tester)
+    url = f"{COGWORK_BASE}/bookings/?org={ORG}&pw={PW}&maxRows={max_rows}&verbose=1"
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     data = r.json()
+
+    if "errors" in data and data["errors"]:
+        raise RuntimeError(f"CogWork API errors: {data['errors']}")
+
     return data.get("bookings", [])
 
 
-def pushover_send(message: str, title: str = "Ny anmälan"):
-    if not (PUSHOVER_APP_TOKEN and PUSHOVER_USER_KEY):
-        raise RuntimeError("Missing PUSHOVER_APP_TOKEN or PUSHOVER_USER_KEY env vars.")
-
-    r = requests.post(
-        "https://api.pushover.net/1/messages.json",
-        data={
-            "token": PUSHOVER_APP_TOKEN,
-            "user": PUSHOVER_USER_KEY,
-            "title": title,
-            "message": message,
-        },
-        timeout=30,
-    )
-    r.raise_for_status()
-
-
-def format_booking(b):
-    created = b.get("created", "")
-    bid = b.get("id", "")
+def format_booking_message(b):
     event = b.get("event", {}) or {}
     participant = b.get("participant", {}) or {}
     payment = b.get("payment", {}) or {}
 
-    event_name = event.get("name", "")
+    event_name = event.get("name", "Okänd kurs")
     event_code = event.get("code", "")
-    start_dt = event.get("startDateTime", "")
-    participant_name = participant.get("name", "")
+    start_dt = event.get("startDateTime", "") or f"{event.get('startDate','')} {event.get('startTime','')}".strip()
+
+    participant_name = participant.get("name", "Okänd deltagare")
+    status_name = (b.get("status", {}) or {}).get("name", "")
+
     paid = payment.get("paid", False)
-    amount = payment.get("amountPaid") or payment.get("priceAgreed")
+    amount = payment.get("amountPaid")
+    currency = payment.get("currency", "SEK")
 
-    paid_txt = "Betald" if paid else "Ej betald"
-    amount_txt = f"{amount} SEK" if amount is not None else ""
+    paid_str = "✅ Betald" if paid else "⏳ Ej betald"
+    amount_str = f" ({amount} {currency})" if amount is not None else ""
 
-    # Kort och tydligt i push
-    msg = (
-        f"{participant_name}\n"
-        f"{event_name} ({event_code})\n"
-        f"Start: {start_dt}\n"
-        f"{paid_txt} {amount_txt}\n"
-        f"Skapad: {created} (ID {bid})"
-    )
-    return msg
+    lines = [
+        f"{event_name}",
+        f"Elev: {participant_name}",
+        f"Status: {status_name}",
+    ]
+    if start_dt:
+        lines.append(f"Start: {start_dt}")
+    if event_code:
+        lines.append(f"Kod: {event_code}")
+    lines.append(f"{paid_str}{amount_str}")
+
+    return "\n".join([line for line in lines if line.strip()])
 
 
 def main():
     state = load_state()
+    last_id = int(state.get("last_notified_booking_id", 0))
 
-    # Om vi aldrig kört: sätt en “cutoff” bakåt i tiden så vi inte spammar
-    if not state["last_created"]:
-        cutoff = datetime.now(TZ) - timedelta(minutes=10)
-    else:
-        cutoff = parse_created(state["last_created"])
+    print(f"Loaded state: last_notified_booking_id={last_id}")
 
-    bookings = fetch_latest_bookings(max_rows=50)
+    bookings = fetch_latest_bookings(FETCH_MAX_ROWS)
+    print(f"Fetched {len(bookings)} bookings")
 
-    # Filtrera "nya"
-    new = []
+    # Plocka ut de som är "nya" jämfört med vår state.
+    # OBS: era booking.id är numeriska och växer.
+    new_bookings = []
     for b in bookings:
-        c = b.get("created")
-        if not c:
+        try:
+            bid = int(b.get("id", 0))
+        except (TypeError, ValueError):
             continue
-        created_dt = parse_created(c)
-        if created_dt > cutoff:
-            new.append((created_dt, b))
+        if bid > last_id:
+            new_bookings.append(b)
 
-    # Sortera äldst -> nyast så pusharna kommer i ordning
-    new.sort(key=lambda x: x[0])
-
-    if not new:
-        print("No new bookings.")
+    if not new_bookings:
+        print("No new bookings. Nothing to notify.")
         return
 
-    # Skicka push per booking (eller batcha, om du vill)
-    newest_created_dt = None
-    newest_id = None
+    # Sortera gamla->nya så notiserna kommer i rätt ordning
+    new_bookings.sort(key=lambda x: int(x.get("id", 0)))
 
-    for created_dt, b in new:
-        pushover_send(format_booking(b), title="Ny anmälan (CogWork)")
-        newest_created_dt = created_dt
-        newest_id = b.get("id")
+    # Begränsa antal notiser per körning (anti-spam)
+    to_notify = new_bookings[:MAX_NOTIFICATIONS_PER_RUN]
+    remaining = len(new_bookings) - len(to_notify)
 
-    # Uppdatera state till senaste vi hanterat
-    if newest_created_dt:
-        state["last_created"] = newest_created_dt.strftime("%Y-%m-%d %H:%M:%S")
-        state["last_id"] = newest_id
-        save_state(state)
+    print(f"New bookings found: {len(new_bookings)}. Will notify: {len(to_notify)} (remaining: {remaining})")
 
-    print(f"Sent {len(new)} notifications. Updated state to {state['last_created']}.")
+    # Skicka notiser
+    for b in to_notify:
+        bid = int(b.get("id", 0))
+        title = "Ny anmälan"
+        message = format_booking_message(b)
+        print(f"Sending notification for booking id={bid} ...")
+        pushover_send(title, message)
+        # liten paus för att vara snäll mot Pushover
+        time.sleep(0.5)
+
+    # Uppdatera state till högsta id vi sett (även om vi inte hann notifiera alla)
+    # så riskerar vi inte spam nästa körning. Vill du hellre notifiera "ikapp" kan vi ändra.
+    max_seen_id = max(int(b.get("id", 0)) for b in new_bookings)
+    state["last_notified_booking_id"] = max_seen_id
+    state["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    save_state(state)
+
+    print(f"Updated state last_notified_booking_id={max_seen_id}")
+    if remaining > 0:
+        print(f"Note: {remaining} more new bookings existed, but were skipped due to MAX_NOTIFICATIONS_PER_RUN.")
 
 
 if __name__ == "__main__":
