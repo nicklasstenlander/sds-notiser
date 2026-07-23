@@ -34,6 +34,8 @@ jobs:
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
 
+          NOTIFIER_SHARED_SECRET: ${{ secrets.NOTIFIER_SHARED_SECRET }}
+
           FETCH_MAX_ROWS: "25"
           MAX_NOTIFICATIONS_PER_RUN: "25"
         run: python notify_bookings.py
