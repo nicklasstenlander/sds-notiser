@@ -11,9 +11,6 @@ COGWORK_BASE = os.getenv("COGWORK_BASE", "https://dans.se/api/public")
 PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN")
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 
-WORKER_URL = os.getenv("WORKER_URL", "https://sds-cogwork-proxy.nicklas-stenlander.workers.dev")
-NOTIFIER_SHARED_SECRET = os.getenv("NOTIFIER_SHARED_SECRET")
-
 STATE_FILE = "state.json"
 
 # Hur många notiser max per körning (skydd mot spam om många nya)
@@ -53,26 +50,6 @@ def pushover_send(title: str, message: str):
     if r.status_code >= 400:
         raise RuntimeError(f"Pushover error {r.status_code}: {r.text}")
     return r.json()
-
-
-def send_native_push(title: str, message: str):
-    if not NOTIFIER_SHARED_SECRET:
-        print("NOTIFIER_SHARED_SECRET saknas — hoppar över native push (icke-kritiskt)")
-        return
-    try:
-        r = requests.post(
-            f"{WORKER_URL}/push/notify-internal",
-            headers={"X-Internal-Secret": NOTIFIER_SHARED_SECRET},
-            json={"title": title, "message": message},
-            timeout=15,
-        )
-        if r.status_code >= 400:
-            print(f"Native push-fel (icke-kritiskt, Pushover redan skickat): {r.status_code} {r.text}")
-        else:
-            print(f"Native push: {r.json()}")
-    except Exception as e:
-        # Native push får ALDRIG stoppa resten av körningen — Pushover är redan skickat
-        print(f"Native push kastade undantag (icke-kritiskt): {e}")
 
 
 def fetch_latest_bookings(max_rows: int):
@@ -184,7 +161,8 @@ def main():
         message = format_booking_message(b)
         print(f"Sending notification for booking id={bid} ...")
         pushover_send(title, message)
-        send_native_push(title, message)
+        # Native push (CORE-appen) skickas av Workerns egen */5-cron (checkNewBookings).
+        # Anropa INTE /push/notify-internal här - det gav dubbla notiser.
         # liten paus för att vara snäll mot Pushover
         time.sleep(0.5)
 
